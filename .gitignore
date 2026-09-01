@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# Секреты — никогда не попадают в репозиторий
+.env
+.env.local
+
+# macOS
+.DS_Store
