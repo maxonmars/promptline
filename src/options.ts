@@ -1,7 +1,10 @@
 import { parseArgs } from "node:util";
 import { FORMATS, FORMAT_NAMES, type FormatName } from "./formats.js";
+import { FINAL_CONTRACT, STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
 
 export interface ResponseOptions {
+  /** Способ рассуждения: как думать, в отличие от format — как оформить. */
+  strategy: StrategyName;
   format: FormatName;
   /** Инструкция о длине в промпте — модель её трактует сама. */
   maxWords: number | null;
@@ -15,12 +18,18 @@ export interface ResponseOptions {
   temperature: number | null;
   /** DeepSeek игнорирует temperature, пока это true (thinking mode включён — так по умолчанию). */
   thinkingEnabled: boolean;
+  /** Требовать в ответе строку FINAL: — по ней --expect сверяет итог. */
+  finalLine: boolean;
 }
 
 export interface Cli {
   prompt: string;
   options: ResponseOptions;
   compare: boolean;
+  /** --strategy=all: прогон всех четырёх способов на одном вопросе. */
+  allStrategies: boolean;
+  /** Варианты верного ответа из --expect; null — точность не измеряется. */
+  expect: string[] | null;
   repeat: number;
   help: boolean;
   warnings: string[];
@@ -37,6 +46,8 @@ const BASE_PROMPT = "Ты полезный ассистент. Отвечай к
 
 /** Пресет со всеми ограничениями: включается флагом --strict, командой /strict и внутри --compare. */
 export const STRICT_OPTIONS: ResponseOptions = {
+  // Поле обязательно по типу, но при переключении пресета способ сохраняется — см. applySlashCommand.
+  strategy: "direct",
   format: "json",
   maxWords: 60,
   maxTokens: null,
@@ -45,16 +56,19 @@ export const STRICT_OPTIONS: ResponseOptions = {
   // для v4-flash/v4-pro), поэтому ставить её в пресет бессмысленно — CLI предупредит, если задать явно.
   temperature: null,
   thinkingEnabled: true,
+  finalLine: false,
 };
 
 /** База без ограничений — свободный текст с историей диалога, стартовый режим по умолчанию. */
 export const RAW_OPTIONS: ResponseOptions = {
+  strategy: "direct",
   format: "text",
   maxWords: null,
   maxTokens: null,
   stopMarker: null,
   temperature: null,
   thinkingEnabled: true,
+  finalLine: false,
 };
 
 export const HELP = `promptline — диалог с LLM через DeepSeek API.
@@ -67,6 +81,11 @@ export const HELP = `promptline — диалог с LLM через DeepSeek API.
 Режим
       --strict                     пресет ограничений: json, 60 слов, стоп-секвенция
       --raw                        без ограничений (так по умолчанию)
+
+Способ рассуждения
+      --strategy=NAME              direct|steps|meta|experts|all (по умолчанию direct)
+                                   all — прогнать все четыре и сравнить
+      --expect=ВАРИАНТ|ВАРИАНТ     верный ответ; сверяется со строкой FINAL: в конце ответа
 
 Формат ответа
   -f, --format=json|md|yaml|text   схема ответа (по умолчанию text)
@@ -88,11 +107,11 @@ export const HELP = `promptline — диалог с LLM через DeepSeek API.
 
 Команды внутри диалога
   /limits              показать текущий режим        /format <name>   сменить формат
-  /len <N>             лимит слов в промпте          /tokens <N>      лимит токенов API
-  /stop <seq|off>      стоп-секвенция                /temp <N>        температура
-  /raw                 снять ограничения             /strict          включить пресет ограничений
-  /thinking on|off     thinking mode                 /help            справка
-  /exit                завершить сессию`;
+  /strategy <name>     способ рассуждения            /len <N>         лимит слов в промпте
+  /stop <seq|off>      стоп-секвенция                /tokens <N>      лимит токенов API
+  /raw                 снять ограничения             /temp <N>        температура
+  /thinking on|off     thinking mode                 /strict          включить пресет ограничений
+  /help                справка                       /exit            завершить сессию`;
 
 /** Стоп-маркер попал бы внутрь json и сломал разбор — при json_object его роль играет закрывающая скобка. */
 function dropStopForJson(options: ResponseOptions, warnings: string[]): void {
@@ -122,6 +141,51 @@ function parseFormat(raw: string): FormatName {
   }
 
   return raw as FormatName;
+}
+
+/** "all" разбирается отдельно: это не значение режима, а команда прогнать все способы. */
+function parseStrategy(raw: string): StrategyName {
+  if (!STRATEGY_NAMES.includes(raw as StrategyName)) {
+    throw new OptionsError(
+      `Неизвестный способ «${raw}». Доступны: ${STRATEGY_NAMES.join(", ")} (all — только флагом --strategy=all).`,
+    );
+  }
+
+  return raw as StrategyName;
+}
+
+function parseExpect(raw: string): string[] {
+  const variants = raw
+    .split("|")
+    .map((variant) => variant.trim())
+    .filter((variant) => variant.length > 0);
+
+  if (variants.length === 0) {
+    throw new OptionsError("--expect ждёт верный ответ, варианты через |. Например: --expect=\"1/2|50%\".");
+  }
+
+  return variants;
+}
+
+/**
+ * Рассуждение и схема ответа — взаимоисключающие контракты: схема summary/items вытеснит разбор,
+ * а строка FINAL сломает разбор json. Сочетание отклоняется, иначе полуприменённый способ попал бы
+ * в сравнение как полноценный.
+ */
+function ensureCompatible(options: ResponseOptions, reasoning: boolean): void {
+  if (options.format === "text") return;
+
+  if (reasoning) {
+    throw new OptionsError(
+      `Способ рассуждения не сочетается с форматом ${options.format}: схема ответа вытеснит разбор. Нужен --format=text.`,
+    );
+  }
+
+  if (options.finalLine) {
+    throw new OptionsError(
+      `--expect не сочетается с форматом ${options.format}: строка FINAL сломает разбор. Нужен --format=text.`,
+    );
+  }
 }
 
 function parseTemperature(raw: string): number {
@@ -154,6 +218,8 @@ export function parseCli(argv: string[]): Cli {
       args: argv,
       allowPositionals: true,
       options: {
+        strategy: { type: "string" },
+        expect: { type: "string" },
         format: { type: "string", short: "f" },
         "max-words": { type: "string" },
         "max-tokens": { type: "string" },
@@ -178,6 +244,9 @@ export function parseCli(argv: string[]): Cli {
   const strictStart = !values.raw && (values.strict === true || values.compare === true);
   const options: ResponseOptions = strictStart ? { ...STRICT_OPTIONS } : { ...RAW_OPTIONS };
 
+  const allStrategies = values.strategy === "all";
+
+  if (typeof values.strategy === "string" && !allStrategies) options.strategy = parseStrategy(values.strategy);
   if (typeof values.format === "string") options.format = parseFormat(values.format);
   if (typeof values["max-words"] === "string") options.maxWords = parseCount(values["max-words"], "--max-words");
   if (typeof values["max-tokens"] === "string") options.maxTokens = parseCount(values["max-tokens"], "--max-tokens");
@@ -196,20 +265,48 @@ export function parseCli(argv: string[]): Cli {
   const compare = values.compare === true;
   const repeat = typeof values.repeat === "string" ? parseCount(values.repeat, "--repeat") : 1;
   const prompt = positionals.join(" ").trim();
+  const expect = typeof values.expect === "string" ? parseExpect(values.expect) : null;
 
   if (compare && repeat > 1) throw new OptionsError("--compare и --repeat вместе не работают.");
   if (compare && !prompt) throw new OptionsError("--compare требует вопрос аргументом.");
   if (repeat > 1 && !prompt) throw new OptionsError("--repeat требует вопрос аргументом.");
+  if (allStrategies && !prompt) throw new OptionsError("--strategy=all требует вопрос аргументом.");
 
-  return { prompt, options, compare, repeat, help: values.help === true, warnings };
+  if (allStrategies && compare) {
+    throw new OptionsError("--strategy=all и --compare вместе не работают: это два разных сравнения.");
+  }
+
+  if (expect !== null && !prompt) {
+    warnings.push("--expect не действует в интерактивном диалоге: точность измеряется только на вопросе аргументом.");
+  }
+
+  // Контракт FINAL нужен только когда точность реально измеряется.
+  options.finalLine = expect !== null && prompt.length > 0;
+
+  ensureCompatible(options, allStrategies || options.strategy !== "direct");
+
+  return { prompt, options, compare, allStrategies, expect, repeat, help: values.help === true, warnings };
 }
 
-export function buildSystemPrompt(options: ResponseOptions): string {
-  const blocks = [BASE_PROMPT, FORMATS[options.format].instruction];
+/**
+ * extraSystem занимает место инструкции способа — у meta это сочинённый моделью промпт.
+ * Он идёт до блоков формата, длины и FINAL: те задают контракт ответа и должны быть последними,
+ * иначе сгенерированный текст перебивает их рецентностью.
+ */
+export function buildSystemPrompt(options: ResponseOptions, extraSystem?: string): string {
+  // Сначала как думать, потом как оформить.
+  const blocks = [
+    BASE_PROMPT,
+    STRATEGIES[options.strategy].instruction,
+    extraSystem ?? "",
+    FORMATS[options.format].instruction,
+  ];
 
   if (options.maxWords !== null) {
     blocks.push(`Уложись в ${options.maxWords} слов. Лучше выкинуть детали, чем превысить лимит.`);
   }
+
+  if (options.finalLine) blocks.push(FINAL_CONTRACT);
 
   if (options.stopMarker !== null) {
     blocks.push(`Закончив ответ, выведи ${options.stopMarker} и больше ничего не пиши.`);
@@ -220,6 +317,7 @@ export function buildSystemPrompt(options: ResponseOptions): string {
 
 export function describeOptions(options: ResponseOptions): string {
   return [
+    `способ: ${options.strategy}`,
     `формат: ${options.format}`,
     `слов: ${options.maxWords ?? "без лимита"}`,
     `токенов: ${options.maxTokens ?? "без лимита"}`,
@@ -240,6 +338,7 @@ export function applySlashCommand(line: string, current: ResponseOptions): Comma
 
   const changed = (): CommandResult => {
     dropStopForJson(options, warnings);
+    ensureCompatible(options, options.strategy !== "direct");
     return { options, output: [...warnings, describeOptions(options)].join("\n") };
   };
 
@@ -249,11 +348,15 @@ export function applySlashCommand(line: string, current: ResponseOptions): Comma
         return { options, output: HELP };
       case "limits":
         return { options, output: describeOptions(options) };
+      // Пресеты задают формат и лимиты; выбранный способ рассуждения они не сбрасывают.
       case "raw":
-        Object.assign(options, RAW_OPTIONS);
+        Object.assign(options, RAW_OPTIONS, { strategy: current.strategy });
         return changed();
       case "strict":
-        Object.assign(options, STRICT_OPTIONS);
+        Object.assign(options, STRICT_OPTIONS, { strategy: current.strategy });
+        return changed();
+      case "strategy":
+        options.strategy = parseStrategy(argument);
         return changed();
       case "format":
         options.format = parseFormat(argument);
