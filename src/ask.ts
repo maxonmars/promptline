@@ -24,6 +24,9 @@ type DeepSeekParams = OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & {
 /**
  * Историю не трогает: системное сообщение подставляется в голову на каждый запрос, чтобы
  * переключение режима действовало сразу. Дописывать реплики в history — забота вызывающего.
+ * extraSystem — дополнительный системный блок: так у meta сгенерированный промпт не занимает
+ * место пользовательского сообщения, которое остаётся за самой задачей. Порядок блоков —
+ * за buildSystemPrompt.
  */
 export async function ask(
   client: OpenAI,
@@ -31,11 +34,12 @@ export async function ask(
   history: OpenAI.Chat.ChatCompletionMessageParam[],
   question: string,
   options: ResponseOptions,
+  extraSystem?: string,
 ): Promise<AskResult> {
   const params: DeepSeekParams = {
     model,
     messages: [
-      { role: "system", content: buildSystemPrompt(options) },
+      { role: "system", content: buildSystemPrompt(options, extraSystem) },
       ...history,
       { role: "user", content: question },
     ],
