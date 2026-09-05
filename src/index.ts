@@ -3,7 +3,7 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import OpenAI from "openai";
 import type { AskResult } from "./ask.js";
-import { solve, StrategyError, type SolveResult } from "./solve.js";
+import { answerKey, solve, StrategyError, type SolveResult } from "./solve.js";
 import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
 import {
   applySlashCommand,
@@ -12,6 +12,7 @@ import {
   OptionsError,
   parseCli,
   RAW_OPTIONS,
+  SWEEP_TEMPERATURES,
   type Cli,
 } from "./options.js";
 
@@ -154,6 +155,22 @@ interface Tally {
   ms: number;
 }
 
+/**
+ * Счётчики одной температуры. Знаменатель здесь даёт извлечённый итог, а не заданный эталон:
+ * контракт FINAL включён и без --expect, и прогон без строки — не ещё один вариант ответа.
+ */
+interface TemperatureTally {
+  runs: number;
+  /** Прогоны со строкой FINAL: знаменатель и разнообразия, и точности. */
+  extracted: number;
+  hits: number;
+  failures: number;
+  tokens: number;
+  ms: number;
+  /** Нормализованные итоги: размер множества и есть разнообразие. */
+  answers: Set<string>;
+}
+
 if (cli.allStrategies) {
   console.log(`\nЗадача: ${cli.prompt}`);
   console.log(`Модель: ${model}`);
@@ -231,6 +248,96 @@ if (cli.allStrategies) {
     if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
     if (stats.unmeasured > 0) notes.push(`без строки FINAL ${stats.unmeasured}`);
     if (notes.length > 0) console.log(`  ${STRATEGIES[name].title}: ${notes.join(", ")}`);
+  }
+
+  console.log(`\nвсего потрачено токенов: ${totalTokens}`);
+} else if (cli.allTemperatures) {
+  console.log(`\nЗапрос: ${cli.prompt}`);
+  console.log(`Модель: ${model}`);
+  console.log(`Режим: ${describeOptions(options)}`);
+  console.log(`Температуры: ${SWEEP_TEMPERATURES.join(", ")}`);
+  console.log(`Верный ответ: ${cli.expect === null ? "не задан, сверяем глазами" : cli.expect.join(" | ")}\n`);
+
+  const tally = new Map<number, TemperatureTally>(
+    SWEEP_TEMPERATURES.map((temperature) => [
+      temperature,
+      { runs: 0, extracted: 0, hits: 0, failures: 0, tokens: 0, ms: 0, answers: new Set<string>() },
+    ]),
+  );
+
+  // Температура внешним циклом: ответы одной настройки идут подряд, иначе разброс не читается.
+  for (const temperature of SWEEP_TEMPERATURES) {
+    const stats = tally.get(temperature)!;
+
+    console.log(`─── temperature ${temperature} ───────────────────`);
+
+    // Последовательно, как и у --strategy=all: параллельные вызовы делят один rate limit.
+    for (let run = 1; run <= cli.repeat; run += 1) {
+      try {
+        // Прогоны независимы: history не копится, иначе модель копировала бы прошлый ответ.
+        const result = await solve(client, model, [], cli.prompt, { ...options, temperature }, cli.expect);
+
+        if (cli.repeat > 1) console.log(`\n── прогон ${run}/${cli.repeat} ─────────────────`);
+
+        if (result.generatedPrompt !== null) {
+          console.log(`\nпромпт, сочинённый моделью:\n${result.generatedPrompt}\n\nответ по этому промпту:`);
+        }
+
+        console.log(`\n${render(result.final)}`);
+        console.log(`${metrics(result)}\n`);
+
+        stats.runs += 1;
+        stats.tokens += result.totalTokens;
+        stats.ms += result.elapsedMs;
+        totalTokens += result.totalTokens;
+
+        if (result.finalValue !== null) {
+          stats.extracted += 1;
+          stats.answers.add(answerKey(result.finalValue));
+        }
+
+        if (result.hit === true) stats.hits += 1;
+      } catch (error) {
+        console.error(`\n— ошибка: ${fail(error)}\n`);
+        stats.failures += 1;
+
+        if (error instanceof StrategyError) {
+          stats.tokens += error.spentTokens;
+          stats.ms += error.elapsedMs;
+          totalTokens += error.spentTokens;
+        }
+      }
+    }
+  }
+
+  const measured = cli.expect !== null;
+  const header = measured
+    ? ["температура", "уникальных", "попаданий", "токенов", "время"]
+    : ["температура", "уникальных", "токенов", "время"];
+
+  const rows = SWEEP_TEMPERATURES.map((temperature) => {
+    const stats = tally.get(temperature)!;
+    const cells = [
+      `${temperature}`,
+      `${stats.answers.size}/${stats.extracted}`,
+      `${stats.tokens}`,
+      seconds(stats.ms),
+    ];
+
+    return measured ? [cells[0]!, cells[1]!, `${stats.hits}/${stats.extracted}`, cells[2]!, cells[3]!] : cells;
+  });
+
+  console.log("═══ ИТОГО ══════════════════════════════════════════\n");
+  console.log(table(header, rows));
+
+  for (const temperature of SWEEP_TEMPERATURES) {
+    const stats = tally.get(temperature)!;
+    const missing = stats.runs - stats.extracted;
+    const notes: string[] = [];
+
+    if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
+    if (missing > 0) notes.push(`без строки FINAL ${missing}`);
+    if (notes.length > 0) console.log(`  temperature ${temperature}: ${notes.join(", ")}`);
   }
 
   console.log(`\nвсего потрачено токенов: ${totalTokens}`);

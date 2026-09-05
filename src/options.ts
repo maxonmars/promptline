@@ -28,6 +28,8 @@ export interface Cli {
   compare: boolean;
   /** --strategy=all: прогон всех четырёх способов на одном вопросе. */
   allStrategies: boolean;
+  /** --temperature=all: прогон одного вопроса на каждой из SWEEP_TEMPERATURES. */
+  allTemperatures: boolean;
   /** Варианты верного ответа из --expect; null — точность не измеряется. */
   expect: string[] | null;
   repeat: number;
@@ -71,6 +73,9 @@ export const RAW_OPTIONS: ResponseOptions = {
   finalLine: false,
 };
 
+/** Точки для --temperature=all: холодная, средняя и горячая. */
+export const SWEEP_TEMPERATURES = [0, 0.7, 1.2];
+
 export const HELP = `promptline — диалог с LLM через DeepSeek API.
 
   npm run dev -- [флаги] ["вопрос"]        -- обязателен, иначе npm съест флаги
@@ -99,7 +104,8 @@ export const HELP = `promptline — диалог с LLM через DeepSeek API.
       --no-stop                    не передавать stop
 
 Прочее
-      --temperature=N              0..2; у reasoning-моделей DeepSeek её игнорирует (thinking mode)
+      --temperature=N|all          0..2; у reasoning-моделей DeepSeek её игнорирует (thinking mode)
+                                   all — прогнать ${SWEEP_TEMPERATURES.join(" / ")} и сравнить разброс
       --thinking=on|off            выключить thinking mode — тогда temperature реально влияет
       --compare                    один вопрос дважды: без ограничений и с ними (--strict)
       --repeat=N                   N независимых прогонов, проверка стабильности формата
@@ -172,7 +178,7 @@ function parseExpect(raw: string): string[] {
  * а строка FINAL сломает разбор json. Сочетание отклоняется, иначе полуприменённый способ попал бы
  * в сравнение как полноценный.
  */
-function ensureCompatible(options: ResponseOptions, reasoning: boolean): void {
+function ensureCompatible(options: ResponseOptions, reasoning: boolean, finalLineFlag: string): void {
   if (options.format === "text") return;
 
   if (reasoning) {
@@ -183,7 +189,7 @@ function ensureCompatible(options: ResponseOptions, reasoning: boolean): void {
 
   if (options.finalLine) {
     throw new OptionsError(
-      `--expect не сочетается с форматом ${options.format}: строка FINAL сломает разбор. Нужен --format=text.`,
+      `${finalLineFlag} не сочетается с форматом ${options.format}: строка FINAL сломает разбор. Нужен --format=text.`,
     );
   }
 }
@@ -245,12 +251,15 @@ export function parseCli(argv: string[]): Cli {
   const options: ResponseOptions = strictStart ? { ...STRICT_OPTIONS } : { ...RAW_OPTIONS };
 
   const allStrategies = values.strategy === "all";
+  const allTemperatures = values.temperature === "all";
 
   if (typeof values.strategy === "string" && !allStrategies) options.strategy = parseStrategy(values.strategy);
   if (typeof values.format === "string") options.format = parseFormat(values.format);
   if (typeof values["max-words"] === "string") options.maxWords = parseCount(values["max-words"], "--max-words");
   if (typeof values["max-tokens"] === "string") options.maxTokens = parseCount(values["max-tokens"], "--max-tokens");
-  if (typeof values.temperature === "string") options.temperature = parseTemperature(values.temperature);
+  if (typeof values.temperature === "string" && !allTemperatures) {
+    options.temperature = parseTemperature(values.temperature);
+  }
   if (typeof values.thinking === "string") options.thinkingEnabled = parseThinking(values.thinking);
 
   if (typeof values.stop === "string") {
@@ -276,16 +285,48 @@ export function parseCli(argv: string[]): Cli {
     throw new OptionsError("--strategy=all и --compare вместе не работают: это два разных сравнения.");
   }
 
+  if (allTemperatures && !prompt) throw new OptionsError("--temperature=all требует вопрос аргументом.");
+
+  if (allTemperatures && compare) {
+    throw new OptionsError("--temperature=all и --compare вместе не работают: это два разных сравнения.");
+  }
+
+  if (allTemperatures && allStrategies) {
+    throw new OptionsError("--temperature=all и --strategy=all вместе не работают: оси перемножатся в 12 прогонов.");
+  }
+
+  if (allTemperatures && options.thinkingEnabled) {
+    warnings.push(
+      "--temperature=all при включённом thinking mode: DeepSeek температуру игнорирует, колонки разойдутся " +
+        "только случайным сэмплированием. Добавь --thinking=off.",
+    );
+  }
+
   if (expect !== null && !prompt) {
     warnings.push("--expect не действует в интерактивном диалоге: точность измеряется только на вопросе аргументом.");
   }
 
-  // Контракт FINAL нужен только когда точность реально измеряется.
-  options.finalLine = expect !== null && prompt.length > 0;
+  // Контракт FINAL нужен и для разнообразия: свободные абзацы дословно не совпадают никогда,
+  // и доля уникальных ответов вышла бы N/N на любой температуре.
+  options.finalLine = (expect !== null || allTemperatures) && prompt.length > 0;
 
-  ensureCompatible(options, allStrategies || options.strategy !== "direct");
+  ensureCompatible(
+    options,
+    allStrategies || options.strategy !== "direct",
+    allTemperatures ? "--temperature=all" : "--expect",
+  );
 
-  return { prompt, options, compare, allStrategies, expect, repeat, help: values.help === true, warnings };
+  return {
+    prompt,
+    options,
+    compare,
+    allStrategies,
+    allTemperatures,
+    expect,
+    repeat,
+    help: values.help === true,
+    warnings,
+  };
 }
 
 /**
@@ -338,7 +379,8 @@ export function applySlashCommand(line: string, current: ResponseOptions): Comma
 
   const changed = (): CommandResult => {
     dropStopForJson(options, warnings);
-    ensureCompatible(options, options.strategy !== "direct");
+    // finalLine интерактивно не включается ничем, поэтому название флага здесь не всплывает.
+    ensureCompatible(options, options.strategy !== "direct", "--expect");
     return { options, output: [...warnings, describeOptions(options)].join("\n") };
   };
 
