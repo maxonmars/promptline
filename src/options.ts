@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { FORMATS, FORMAT_NAMES, type FormatName } from "./formats.js";
+import { KNOWN_MODELS, SWEEP_MODELS } from "./models.js";
 import { FINAL_CONTRACT, STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
 
 export interface ResponseOptions {
@@ -30,6 +31,10 @@ export interface Cli {
   allStrategies: boolean;
   /** --temperature=all: прогон одного вопроса на каждой из SWEEP_TEMPERATURES. */
   allTemperatures: boolean;
+  /** Явный --model=NAME; null — брать DEEPSEEK_MODEL из .env. */
+  model: string | null;
+  /** --model=all: прогон одного вопроса на каждом уровне из SWEEP_MODELS. */
+  allModels: boolean;
   /** Варианты верного ответа из --expect; null — точность не измеряется. */
   expect: string[] | null;
   repeat: number;
@@ -107,6 +112,8 @@ export const HELP = `promptline — диалог с LLM через DeepSeek API.
       --temperature=N|all          0..2; у reasoning-моделей DeepSeek её игнорирует (thinking mode)
                                    all — прогнать ${SWEEP_TEMPERATURES.join(" / ")} и сравнить разброс
       --thinking=on|off            выключить thinking mode — тогда temperature реально влияет
+      --model=NAME|all             модель вместо DEEPSEEK_MODEL из .env
+                                   all — прогнать ${SWEEP_MODELS.map((tier) => tier.label).join(" / ")}
       --compare                    один вопрос дважды: без ограничений и с ними (--strict)
       --repeat=N                   N независимых прогонов, проверка стабильности формата
   -h, --help                       эта справка
@@ -158,6 +165,19 @@ function parseStrategy(raw: string): StrategyName {
   }
 
   return raw as StrategyName;
+}
+
+/** Список моделей не закрытый: опечатка не отклоняется здесь, а всплывёт понятным 400 из API. */
+function parseModel(raw: string, warnings: string[]): string {
+  if (raw.trim().length === 0) {
+    throw new OptionsError("--model ждёт идентификатор модели, значение не задано.");
+  }
+
+  if (!KNOWN_MODELS.includes(raw)) {
+    warnings.push(`Модель «${raw}» не входит в известные (${KNOWN_MODELS.join(", ")}) — возможна опечатка.`);
+  }
+
+  return raw;
 }
 
 function parseExpect(raw: string): string[] {
@@ -233,6 +253,7 @@ export function parseCli(argv: string[]): Cli {
         "no-stop": { type: "boolean" },
         temperature: { type: "string" },
         thinking: { type: "string" },
+        model: { type: "string" },
         raw: { type: "boolean" },
         strict: { type: "boolean" },
         compare: { type: "boolean" },
@@ -252,6 +273,7 @@ export function parseCli(argv: string[]): Cli {
 
   const allStrategies = values.strategy === "all";
   const allTemperatures = values.temperature === "all";
+  const allModels = values.model === "all";
 
   if (typeof values.strategy === "string" && !allStrategies) options.strategy = parseStrategy(values.strategy);
   if (typeof values.format === "string") options.format = parseFormat(values.format);
@@ -261,6 +283,8 @@ export function parseCli(argv: string[]): Cli {
     options.temperature = parseTemperature(values.temperature);
   }
   if (typeof values.thinking === "string") options.thinkingEnabled = parseThinking(values.thinking);
+
+  const model = typeof values.model === "string" && !allModels ? parseModel(values.model, warnings) : null;
 
   if (typeof values.stop === "string") {
     if (values.stop.length === 0) throw new OptionsError("--stop ждёт непустую строку.");
@@ -295,6 +319,25 @@ export function parseCli(argv: string[]): Cli {
     throw new OptionsError("--temperature=all и --strategy=all вместе не работают: оси перемножатся в 12 прогонов.");
   }
 
+  if (allModels && !prompt) throw new OptionsError("--model=all требует вопрос аргументом.");
+
+  if (allModels && compare) {
+    throw new OptionsError("--model=all и --compare вместе не работают: это два разных сравнения.");
+  }
+
+  if (allModels && allStrategies) {
+    throw new OptionsError("--model=all и --strategy=all вместе не работают: оси перемножатся в 12 прогонов.");
+  }
+
+  if (allModels && allTemperatures) {
+    throw new OptionsError("--model=all и --temperature=all вместе не работают: оси перемножатся в 9 прогонов.");
+  }
+
+  // thinking входит в сам уровень SWEEP_MODELS — явный флаг уравнял бы часть уровней между собой.
+  if (allModels && typeof values.thinking === "string") {
+    throw new OptionsError("--model=all и --thinking вместе не работают: thinking уже задан для каждого уровня.");
+  }
+
   if (allTemperatures && options.thinkingEnabled) {
     warnings.push(
       "--temperature=all при включённом thinking mode: DeepSeek температуру игнорирует, колонки разойдутся " +
@@ -322,6 +365,8 @@ export function parseCli(argv: string[]): Cli {
     compare,
     allStrategies,
     allTemperatures,
+    model,
+    allModels,
     expect,
     repeat,
     help: values.help === true,

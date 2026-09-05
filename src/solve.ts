@@ -28,6 +28,8 @@ export interface SolveResult {
   measured: boolean;
   /** Сумма по всем вызовам способа — его полная цена. */
   totalTokens: number;
+  /** Сумма по всем вызовам, а не диагностика одной генерации — как и totalTokens. */
+  reasoningTokens: number;
   elapsedMs: number;
   /** null — точность не измерялась либо итог не извлёкся. */
   hit: boolean | null;
@@ -133,6 +135,7 @@ export async function solve(
     finalValue,
     measured: expect !== null,
     totalTokens: final.totalTokens + (preparation?.totalTokens ?? 0),
+    reasoningTokens: final.reasoningTokens + (preparation?.reasoningTokens ?? 0),
     elapsedMs: Date.now() - started,
     hit,
   };

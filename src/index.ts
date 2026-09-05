@@ -3,6 +3,7 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import OpenAI from "openai";
 import type { AskResult } from "./ask.js";
+import { DEFAULT_MODEL, SWEEP_MODELS } from "./models.js";
 import { answerKey, solve, StrategyError, type SolveResult } from "./solve.js";
 import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
 import {
@@ -38,12 +39,16 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const model = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
+const model = cli.model ?? process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL;
 
 // DeepSeek отдаёт OpenAI-совместимый API — хватает подмены baseURL в официальном SDK.
 const client = new OpenAI({
   apiKey,
   baseURL: "https://api.deepseek.com",
+  // Совпадают со значениями SDK по умолчанию; явно — потому что ретраи на 429 копятся
+  // в elapsedMs у --model=all, но в failures не попадают.
+  maxRetries: 2,
+  timeout: 600_000,
 });
 
 const history: OpenAI.Chat.ChatCompletionMessageParam[] = [];
@@ -169,6 +174,23 @@ interface TemperatureTally {
   ms: number;
   /** Нормализованные итоги: размер множества и есть разнообразие. */
   answers: Set<string>;
+}
+
+/**
+ * Счётчики одного уровня. runs — прогоны с непустым ответом: сбой и пустой content тоже
+ * оплачены, но в среднюю цену ответа не идут. attempts — знаменатель долей, отдельно от runs.
+ */
+interface ModelTally {
+  attempts: number;
+  runs: number;
+  /** Вызов прошёл, но content пустой: расход есть, ответа нет. */
+  empty: number;
+  extracted: number;
+  hits: number;
+  failures: number;
+  tokens: number;
+  reasoning: number;
+  ms: number;
 }
 
 if (cli.allStrategies) {
@@ -338,6 +360,114 @@ if (cli.allStrategies) {
     if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
     if (missing > 0) notes.push(`без строки FINAL ${missing}`);
     if (notes.length > 0) console.log(`  temperature ${temperature}: ${notes.join(", ")}`);
+  }
+
+  console.log(`\nвсего потрачено токенов: ${totalTokens}`);
+} else if (cli.allModels) {
+  console.log(`\nЗапрос: ${cli.prompt}`);
+  console.log(`Уровни: ${SWEEP_MODELS.map((tier) => tier.label).join(" / ")}`);
+  console.log(`Верный ответ: ${cli.expect === null ? "не задан, сверяем глазами" : cli.expect.join(" | ")}\n`);
+
+  const tally = new Map<string, ModelTally>(
+    SWEEP_MODELS.map((tier) => [
+      tier.label,
+      { attempts: 0, runs: 0, empty: 0, extracted: 0, hits: 0, failures: 0, tokens: 0, reasoning: 0, ms: 0 },
+    ]),
+  );
+
+  // Уровень внешним циклом, как и температура: ответы одной настройки идут подряд, иначе
+  // разброс не читается, а последовательные вызовы не делят общий rate limit.
+  for (const tier of SWEEP_MODELS) {
+    const stats = tally.get(tier.label)!;
+    // thinking задаёт сам уровень — не общий options.thinkingEnabled, который --model=all не трогает.
+    const tierOptions = { ...options, thinkingEnabled: tier.thinkingEnabled };
+
+    console.log(`─── ${tier.label} (${tier.model}) ───────────────────`);
+    console.log(`режим: ${describeOptions(tierOptions)}\n`);
+
+    for (let run = 1; run <= cli.repeat; run += 1) {
+      stats.attempts += 1;
+
+      try {
+        // Прогоны независимы: history не копится, иначе модель копировала бы прошлый ответ.
+        const result = await solve(client, tier.model, [], cli.prompt, tierOptions, cli.expect);
+
+        if (cli.repeat > 1) console.log(`── прогон ${run}/${cli.repeat} ─────────────────`);
+
+        if (result.generatedPrompt !== null) {
+          console.log(`\nпромпт, сочинённый моделью:\n${result.generatedPrompt}\n\nответ по этому промпту:`);
+        }
+
+        console.log(`\n${render(result.final)}`);
+        console.log(`${metrics(result)}\n`);
+
+        totalTokens += result.totalTokens;
+
+        // У reasoning-модели пустой content приходит без исключения. Прогон оплачен, ответа нет —
+        // в среднюю цену ответа он не идёт, как и сбой.
+        if (result.final.answer.length === 0) {
+          stats.empty += 1;
+        } else {
+          stats.runs += 1;
+          stats.tokens += result.totalTokens;
+          stats.reasoning += result.reasoningTokens;
+          stats.ms += result.elapsedMs;
+
+          if (result.finalValue !== null) stats.extracted += 1;
+          if (result.hit === true) stats.hits += 1;
+        }
+      } catch (error) {
+        console.error(`\n— ошибка: ${fail(error)}\n`);
+        stats.failures += 1;
+
+        // В tokens/ms уровня не идёт: средние на полученный ответ иначе занижались бы сбоем.
+        if (error instanceof StrategyError) totalTokens += error.spentTokens;
+      }
+    }
+  }
+
+  const measured = cli.expect !== null;
+  const header = measured
+    ? ["уровень", "попаданий", "сравнимых", "токенов", "рассуждение", "время"]
+    : ["уровень", "ответов", "токенов", "рассуждение", "время"];
+
+  // "—" вместо 0: уровень без единого ответа не должен выглядеть самым дешёвым и быстрым.
+  const average = (sum: number, runs: number): string => (runs > 0 ? `${Math.round(sum / runs)}` : "—");
+
+  const rows = SWEEP_MODELS.map((tier) => {
+    const stats = tally.get(tier.label)!;
+    const tokens = average(stats.tokens, stats.runs);
+    const reasoning = average(stats.reasoning, stats.runs);
+    const time = stats.runs > 0 ? seconds(stats.ms / stats.runs) : "—";
+
+    if (measured) {
+      return [
+        tier.label,
+        `${stats.hits}/${stats.extracted}`,
+        `${stats.extracted}/${stats.attempts}`,
+        tokens,
+        reasoning,
+        time,
+      ];
+    }
+
+    return [tier.label, `${stats.runs}/${stats.attempts}`, tokens, reasoning, time];
+  });
+
+  console.log("═══ ИТОГО ══════════════════════════════════════════\n");
+  console.log("токены, рассуждение и время — средние на один полученный ответ, не сумма\n");
+  console.log(table(header, rows));
+
+  // Три разные потери: запрос не прошёл, ответ пришёл пустым, ответ есть — но без строки FINAL.
+  for (const tier of SWEEP_MODELS) {
+    const stats = tally.get(tier.label)!;
+    const missing = stats.runs - stats.extracted;
+    const notes: string[] = [];
+
+    if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
+    if (stats.empty > 0) notes.push(`пустых ответов ${stats.empty}`);
+    if (measured && missing > 0) notes.push(`без строки FINAL ${missing}`);
+    if (notes.length > 0) console.log(`  ${tier.label}: ${notes.join(", ")}`);
   }
 
   console.log(`\nвсего потрачено токенов: ${totalTokens}`);
