@@ -42,12 +42,15 @@ export function extractFinal(answer: string): string | null {
   return matches.at(-1)?.[1] ?? null;
 }
 
-/** Крайняя пунктуация и регистр значения не меняют: «Даша.» и «Даша» — один ответ. */
+/**
+ * Крайняя пунктуация и регистр значения не меняют: «Даша.» и «Даша» — один ответ.
+ * Минус и скобки не обрезаются: «-1» и «1», «(0,1)» и «[0,1]» — разные ответы.
+ */
 function normalize(value: string): string {
   return value
     .toLowerCase()
     .replace(/\s+/g, " ")
-    .replace(/^[\s.,;:!?"'«»()[\]—–-]+|[\s.,;:!?"'«»()[\]—–-]+$/g, "");
+    .replace(/^[\s.,;:!?"'«»—–]+|[\s.,;:!?"'«»—–]+$/g, "");
 }
 
 /**
@@ -58,6 +61,11 @@ export function matchesExpected(final: string, expect: string[]): boolean {
   const normalized = normalize(final);
 
   return expect.some((variant) => normalized === normalize(variant));
+}
+
+/** Ключ для подсчёта разных ответов: «Кот.» и «кот» — один ответ, а не два. */
+export function answerKey(finalValue: string): string {
+  return normalize(finalValue);
 }
 
 /**
