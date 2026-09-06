@@ -5,20 +5,30 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
   },
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
-    "openai": "^7.8.0"
+    "openai": "^7.8.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0",
+    "@biomejs/biome": "^2.5.12",
+    "@types/node": "^24.13.3",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
   }
 }

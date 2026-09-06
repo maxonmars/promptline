@@ -1,4 +1,13 @@
-export type FormatName = "json" | "md" | "yaml" | "text";
+import * as YAML from "yaml";
+import { z } from "zod";
+
+export const FORMAT_NAMES = ["json", "md", "yaml", "text"] as const;
+
+export const FormatNameSchema = z.enum(FORMAT_NAMES, {
+  error: (issue) => `Неизвестный формат «${issue.input}». Доступны: ${FORMAT_NAMES.join(", ")}.`,
+});
+
+export type FormatName = z.infer<typeof FormatNameSchema>;
 
 export interface ValidationResult {
   ok: boolean;
@@ -11,9 +20,71 @@ export interface FormatSpec {
   validate(answer: string): ValidationResult;
 }
 
-const ITEM_FIELDS = ["order", "name", "weight"] as const;
-
 const MD_HEADINGS = ["## Кратко", "## Пункты"];
+
+/** Общий контракт json и yaml: summary плюс items с order/name/weight. */
+const ContractSchema = z.object({
+  summary: z.string(),
+  items: z.array(
+    z.object({
+      order: z.number(),
+      name: z.string(),
+      weight: z.string(),
+    }),
+  ),
+});
+
+function describePath(path: PropertyKey[]): string {
+  return path.reduce<string>((acc, segment) => {
+    if (typeof segment === "number") return `${acc}[${segment}]`;
+    return acc.length > 0 ? `${acc}.${String(segment)}` : String(segment);
+  }, "");
+}
+
+function expectedPhrase(expected: string): string {
+  switch (expected) {
+    case "string":
+      return "ожидалась строка";
+    case "number":
+      return "ожидалось число";
+    case "array":
+      return "ожидался массив";
+    case "object":
+      return "ожидался объект";
+    default:
+      return `ожидался тип ${expected}`;
+  }
+}
+
+/** Zod не кладёт исходное значение в issue — приходится доставать его из разобранного ответа самим. */
+function resolvePath(root: unknown, path: PropertyKey[]): unknown {
+  let current = root;
+
+  for (const segment of path) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<PropertyKey, unknown>)[segment];
+  }
+
+  return current;
+}
+
+function describeIssue(issue: z.core.$ZodIssue, root: unknown): string {
+  const path = describePath(issue.path);
+
+  if (issue.code === "invalid_type") {
+    if (path.length === 0 && issue.expected === "object") return "на верхнем уровне не объект";
+    if (resolvePath(root, issue.path) === undefined) return path.length > 0 ? `нет поля ${path}` : "нет поля";
+
+    return path.length > 0 ? `${path}: ${expectedPhrase(issue.expected)}` : expectedPhrase(issue.expected);
+  }
+
+  return path.length > 0 ? `${path}: ${issue.message}` : issue.message;
+}
+
+/** Перечисляет все нарушения контракта, а не только первое найденное. */
+function describeContractIssues(error: z.ZodError, root: unknown): string {
+  return error.issues.map((issue) => describeIssue(issue, root)).join("; ");
+}
 
 function validateJson(answer: string): ValidationResult {
   let parsed: unknown;
@@ -24,33 +95,9 @@ function validateJson(answer: string): ValidationResult {
     return { ok: false, reason: "не разбирается как JSON" };
   }
 
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, reason: "на верхнем уровне не объект" };
-  }
+  const result = ContractSchema.safeParse(parsed);
 
-  if (!("summary" in parsed)) {
-    return { ok: false, reason: "нет поля summary" };
-  }
-
-  const { items } = parsed as { items?: unknown };
-
-  if (!Array.isArray(items)) {
-    return { ok: false, reason: "нет массива items" };
-  }
-
-  for (const [index, item] of items.entries()) {
-    if (typeof item !== "object" || item === null) {
-      return { ok: false, reason: `items[${index}] не объект` };
-    }
-
-    const missing = ITEM_FIELDS.filter((field) => !(field in item));
-
-    if (missing.length > 0) {
-      return { ok: false, reason: `items[${index}] без полей: ${missing.join(", ")}` };
-    }
-  }
-
-  return { ok: true };
+  return result.success ? { ok: true } : { ok: false, reason: describeContractIssues(result.error, parsed) };
 }
 
 function validateMd(answer: string): ValidationResult {
@@ -59,15 +106,31 @@ function validateMd(answer: string): ValidationResult {
   return missing.length > 0 ? { ok: false, reason: `нет заголовков: ${missing.join(", ")}` } : { ok: true };
 }
 
+/**
+ * Строго, без снятия markdown-ограждения: инструкция формата прямо требует «без обёртки в
+ * markdown-блок», и json на такой обёртке уже падает — прощающий валидатор здесь измерял бы
+ * не то, что заявляет контракт.
+ */
 function validateYaml(answer: string): ValidationResult {
-  const missing = ["summary", "items"].filter((key) => !new RegExp(`^${key}:`, "m").test(answer));
+  let parsed: unknown;
 
-  return missing.length > 0 ? { ok: false, reason: `нет ключей: ${missing.join(", ")}` } : { ok: true };
+  try {
+    parsed = YAML.parse(answer);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `не разбирается как YAML: ${reason}` };
+  }
+
+  const result = ContractSchema.safeParse(parsed);
+
+  return result.success ? { ok: true } : { ok: false, reason: describeContractIssues(result.error, parsed) };
 }
 
 /**
- * Три формата описывают один и тот же контракт — summary плюс items с полями order/name/weight.
- * Сменить предметную область — значит переписать эти instruction и ITEM_FIELDS.
+ * Три формата описывают один и тот же контракт — summary плюс items с полями order/name/weight,
+ * проверяемый общей ContractSchema у json и yaml. Сменить предметную область — значит переписать
+ * эти instruction и ContractSchema. У md контракт не проверяется: заголовки — не структура,
+ * а substring-проверка.
  */
 export const FORMATS: Record<FormatName, FormatSpec> = {
   // Слово «json» обязано быть в промпте: без него DeepSeek отклоняет response_format: json_object.
@@ -115,5 +178,3 @@ export const FORMATS: Record<FormatName, FormatSpec> = {
     validate: () => ({ ok: true }),
   },
 };
-
-export const FORMAT_NAMES = Object.keys(FORMATS) as FormatName[];

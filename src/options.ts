@@ -1,7 +1,8 @@
 import { parseArgs } from "node:util";
-import { FORMATS, FORMAT_NAMES, type FormatName } from "./formats.js";
+import { z } from "zod";
+import { FORMATS, type FormatName, FormatNameSchema } from "./formats.js";
 import { KNOWN_MODELS, SWEEP_MODELS } from "./models.js";
-import { FINAL_CONTRACT, STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
+import { FINAL_CONTRACT, STRATEGIES, type StrategyName, StrategyNameSchema } from "./strategies.js";
 
 export interface ResponseOptions {
   /** Способ рассуждения: как думать, в отличие от format — как оформить. */
@@ -138,33 +139,40 @@ function dropStopForJson(options: ResponseOptions, warnings: string[]): void {
   }
 }
 
+/** Возвращает готовое сообщение первого нарушения — вызывающие сохраняют прежний контракт throw. */
+function parseWith<T>(schema: z.ZodType<T>, raw: string): T {
+  const result = schema.safeParse(raw);
+
+  if (!result.success) throw new OptionsError(result.error.issues[0]!.message);
+
+  return result.data;
+}
+
+/** z.coerce здесь не годится: коэрсия стирает исходную строку, а «получено «…»» должно её показывать. */
+function countSchema(flag: string) {
+  return z
+    .string()
+    .refine(
+      (value) => {
+        const number = Number(value);
+        return Number.isInteger(number) && number > 0;
+      },
+      { error: (issue) => `${flag} ждёт целое положительное число, получено «${issue.input}».` },
+    )
+    .transform((value) => Number(value));
+}
+
 function parseCount(raw: string, flag: string): number {
-  const value = Number(raw);
-
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new OptionsError(`${flag} ждёт целое положительное число, получено «${raw}».`);
-  }
-
-  return value;
+  return parseWith(countSchema(flag), raw);
 }
 
 function parseFormat(raw: string): FormatName {
-  if (!FORMAT_NAMES.includes(raw as FormatName)) {
-    throw new OptionsError(`Неизвестный формат «${raw}». Доступны: ${FORMAT_NAMES.join(", ")}.`);
-  }
-
-  return raw as FormatName;
+  return parseWith(FormatNameSchema, raw);
 }
 
-/** "all" разбирается отдельно: это не значение режима, а команда прогнать все способы. */
+/** "all" разбирается отдельно в parseCli: это не значение режима, а команда прогнать все способы. */
 function parseStrategy(raw: string): StrategyName {
-  if (!STRATEGY_NAMES.includes(raw as StrategyName)) {
-    throw new OptionsError(
-      `Неизвестный способ «${raw}». Доступны: ${STRATEGY_NAMES.join(", ")} (all — только флагом --strategy=all).`,
-    );
-  }
-
-  return raw as StrategyName;
+  return parseWith(StrategyNameSchema, raw);
 }
 
 /** Список моделей не закрытый: опечатка не отклоняется здесь, а всплывёт понятным 400 из API. */
@@ -180,17 +188,20 @@ function parseModel(raw: string, warnings: string[]): string {
   return raw;
 }
 
+const ExpectSchema = z
+  .string()
+  .transform((raw) =>
+    raw
+      .split("|")
+      .map((variant) => variant.trim())
+      .filter((variant) => variant.length > 0),
+  )
+  .refine((variants) => variants.length > 0, {
+    error: '--expect ждёт верный ответ, варианты через |. Например: --expect="1/2|50%".',
+  });
+
 function parseExpect(raw: string): string[] {
-  const variants = raw
-    .split("|")
-    .map((variant) => variant.trim())
-    .filter((variant) => variant.length > 0);
-
-  if (variants.length === 0) {
-    throw new OptionsError("--expect ждёт верный ответ, варианты через |. Например: --expect=\"1/2|50%\".");
-  }
-
-  return variants;
+  return parseWith(ExpectSchema, raw);
 }
 
 /**
@@ -214,25 +225,29 @@ function ensureCompatible(options: ResponseOptions, reasoning: boolean, finalLin
   }
 }
 
+/** Два refine вместо одного: пустая строка и число вне диапазона — разные сообщения. */
+const TemperatureSchema = z
+  .string()
+  .refine((raw) => raw.trim().length > 0, { error: "--temperature ждёт число от 0 до 2, значение не задано." })
+  .refine(
+    (raw) => {
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= 0 && value <= 2;
+    },
+    { error: (issue) => `--temperature ждёт число от 0 до 2, получено «${issue.input}».` },
+  )
+  .transform((raw) => Number(raw));
+
 function parseTemperature(raw: string): number {
-  if (raw.trim().length === 0) {
-    throw new OptionsError("--temperature ждёт число от 0 до 2, значение не задано.");
-  }
-
-  const value = Number(raw);
-
-  if (!Number.isFinite(value) || value < 0 || value > 2) {
-    throw new OptionsError(`--temperature ждёт число от 0 до 2, получено «${raw}».`);
-  }
-
-  return value;
+  return parseWith(TemperatureSchema, raw);
 }
 
-function parseThinking(raw: string): boolean {
-  if (raw === "on") return true;
-  if (raw === "off") return false;
+const ThinkingSchema = z
+  .enum(["on", "off"], { error: (issue) => `--thinking ждёт on или off, получено «${issue.input}».` })
+  .transform((value) => value === "on");
 
-  throw new OptionsError(`--thinking ждёт on или off, получено «${raw}».`);
+function parseThinking(raw: string): boolean {
+  return parseWith(ThinkingSchema, raw);
 }
 
 export function parseCli(argv: string[]): Cli {

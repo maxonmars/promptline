@@ -1,21 +1,21 @@
-import "dotenv/config";
-import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import * as readline from "node:readline/promises";
 import OpenAI from "openai";
 import type { AskResult } from "./ask.js";
+import { type Env, readEnv } from "./env.js";
 import { DEFAULT_MODEL, SWEEP_MODELS } from "./models.js";
-import { answerKey, solve, StrategyError, type SolveResult } from "./solve.js";
-import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
 import {
   applySlashCommand,
+  type Cli,
   describeOptions,
   HELP,
   OptionsError,
   parseCli,
   RAW_OPTIONS,
   SWEEP_TEMPERATURES,
-  type Cli,
 } from "./options.js";
+import { answerKey, type SolveResult, StrategyError, solve } from "./solve.js";
+import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
 
 let cli: Cli;
 
@@ -32,18 +32,20 @@ if (cli.help) {
   process.exit(0);
 }
 
-const apiKey = process.env.DEEPSEEK_API_KEY;
+let env: Env;
 
-if (!apiKey) {
-  console.error("Нет DEEPSEEK_API_KEY. Скопируй .env.example в .env и впиши свой ключ.");
+try {
+  env = readEnv();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
 
-const model = cli.model ?? process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL;
+const model = cli.model ?? env.model ?? DEFAULT_MODEL;
 
 // DeepSeek отдаёт OpenAI-совместимый API — хватает подмены baseURL в официальном SDK.
 const client = new OpenAI({
-  apiKey,
+  apiKey: env.apiKey,
   baseURL: "https://api.deepseek.com",
   // Совпадают со значениями SDK по умолчанию; явно — потому что ретраи на 429 копятся
   // в elapsedMs у --model=all, но в failures не попадают.
@@ -136,9 +138,7 @@ function fail(error: unknown): string {
 
 /** Первая колонка влево, числовые — вправо. */
 function table(header: string[], rows: string[][]): string {
-  const widths = header.map((_, column) =>
-    Math.max(...[header, ...rows].map((row) => (row[column] ?? "").length)),
-  );
+  const widths = header.map((_, column) => Math.max(...[header, ...rows].map((row) => (row[column] ?? "").length)));
 
   return [header, ...rows]
     .map((row) =>
@@ -339,12 +339,7 @@ if (cli.allStrategies) {
 
   const rows = SWEEP_TEMPERATURES.map((temperature) => {
     const stats = tally.get(temperature)!;
-    const cells = [
-      `${temperature}`,
-      `${stats.answers.size}/${stats.extracted}`,
-      `${stats.tokens}`,
-      seconds(stats.ms),
-    ];
+    const cells = [`${temperature}`, `${stats.answers.size}/${stats.extracted}`, `${stats.tokens}`, seconds(stats.ms)];
 
     return measured ? [cells[0]!, cells[1]!, `${stats.hits}/${stats.extracted}`, cells[2]!, cells[3]!] : cells;
   });
@@ -569,10 +564,7 @@ if (cli.allStrategies) {
       // в history не остаётся, иначе следующий запрос уходит с фиктивной репликой ассистента.
       // В history идёт исходный вопрос, а не сгенерированный промпт: диалог должен читаться.
       if (result.final.answer.length > 0) {
-        history.push(
-          { role: "user", content: question },
-          { role: "assistant", content: result.final.answer },
-        );
+        history.push({ role: "user", content: question }, { role: "assistant", content: result.final.answer });
       }
 
       totalTokens += result.totalTokens;

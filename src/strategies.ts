@@ -1,4 +1,14 @@
-export type StrategyName = "direct" | "steps" | "meta" | "experts";
+import { z } from "zod";
+
+export const STRATEGY_NAMES = ["direct", "steps", "meta", "experts"] as const;
+
+/** "all" разбирается отдельно в options.ts: это не значение способа, а команда прогнать все четыре. */
+export const StrategyNameSchema = z.enum(STRATEGY_NAMES, {
+  error: (issue) =>
+    `Неизвестный способ «${issue.input}». Доступны: ${STRATEGY_NAMES.join(", ")} (all — только флагом --strategy=all).`,
+});
+
+export type StrategyName = z.infer<typeof StrategyNameSchema>;
 
 export interface StrategySpec {
   /** Заголовок блока в сравнении способов. */
@@ -55,5 +65,3 @@ export const STRATEGIES: Record<StrategyName, StrategySpec> = {
     ].join("\n"),
   },
 };
-
-export const STRATEGY_NAMES = Object.keys(STRATEGIES) as StrategyName[];
