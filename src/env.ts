@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { z } from "zod";
 
 const API_KEY_MESSAGE = "Нет DEEPSEEK_API_KEY. Скопируй .env.example в .env и впиши свой ключ.";
@@ -17,8 +16,22 @@ export interface Env {
   model: string | null;
 }
 
+// .env необязателен — переменные могут прийти из окружения, а loadEnvFile бросает на его отсутствие.
+// Значения из окружения он не перекрывает.
+function loadEnvFile(): void {
+  try {
+    process.loadEnvFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
 /** Бросает при отсутствии ключа — вызывающий печатает сообщение и завершает процесс сам. */
 export function readEnv(): Env {
+  loadEnvFile();
+
   const result = EnvSchema.safeParse(process.env);
 
   if (!result.success) {

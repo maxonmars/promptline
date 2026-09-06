@@ -1,0 +1,10 @@
+#!/bin/sh
+# Быстрая подстраховка перед коммитом; те же проверки целиком — в CI.
+# Biome без --write: автофикс переписал бы и незастейдженные куски файла.
+
+if ! npm run --silent lint:staged; then
+  echo "Починить: npm run lint:fix" >&2
+  exit 1
+fi
+
+npm run --silent typecheck

@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 `promptline` — CLI для диалога с LLM через DeepSeek API. Два режима: с аргументом — один вопрос
 и выход, без аргумента — интерактивный диалог через `node:readline/promises`. Флаги и слэш-команды
-задают формат ответа, лимит длины, условие завершения и способ рассуждения. Линтер — Biome, тесты — Vitest. CI нет.
+задают формат ответа, лимит длины, условие завершения и способ рассуждения. Линтер — Biome, тесты — Vitest, CI на GitHub Actions.
 
 ## Команды
 
@@ -27,7 +27,18 @@ npm run typecheck                        # tsc --noEmit над src и tests
 npm test                                 # vitest run
 ```
 
-Нужен Node.js 24+ и `.env` с `DEEPSEEK_API_KEY` (шаблон — `.env.example`).
+Нужен Node.js 24+ (исполняет TypeScript сам) и `.env` с `DEEPSEEK_API_KEY` (шаблон — `.env.example`).
+
+## Проверки
+
+`lint`, `typecheck`, `test` и `build` гоняет CI (`.github/workflows/ci.yml`) на каждый PR и push
+в `main`. Прекоммит-хук `.githooks/pre-commit` повторяет линтер по застейдженным файлам и тайпчек;
+подключается скриптом `prepare` при `npm install`. Хук — подстраховка, а не замена CI: он обходится
+`--no-verify` и не существует до первой установки зависимостей.
+
+Biome в хуке запускается без `--write`: автофикс правит файл целиком, включая незастейдженные
+куски, и в коммит ушло бы не то, что показывал `git diff --staged`. `npm run build` держится в CI
+отдельным шагом — эмит `.ts` → `.js` в импортах тайпчеком не покрыт.
 
 ## Архитектура
 
@@ -109,8 +120,17 @@ DeepSeek отдаёт API, совместимый с OpenAI, поэтому ис
 `RAW_OPTIONS` и `STRICT_OPTIONS` существует только ради полноты типа. `/strict` при активном способе
 отклоняется целиком — json со способом несовместим.
 
-ESM: `"type": "module"` + `module: "nodenext"`. Top-level `await` используется напрямую,
-относительные импорты внутри проекта потребуют расширения `.js`.
+ESM: `"type": "module"` + `module: "nodenext"`. Top-level `await` используется напрямую.
+
+TypeScript исполняет сам Node, сборщика в дев-режиме нет: `npm run dev` — это `node src/index.ts`.
+Типы Node стирает, но пути не переписывает и `./x.js` в `./x.ts` не резолвит, поэтому относительные
+импорты внутри проекта указывают на `.ts`, а `rewriteRelativeImportExtensions` возвращает им `.js`
+при сборке в `dist/`. `erasableSyntaxOnly` запрещает синтаксис, который стиранием не убирается:
+на нём споткнулся `StrategyError` с parameter properties.
+
+Переменные окружения читает `process.loadEnvFile()` в `env.ts`, dotenv не нужен. Отсутствие `.env`
+он считает ошибкой — она глушится по коду `ENOENT`, потому что ключ может прийти и из окружения.
+Значения окружения файл не перекрывает.
 
 ## Особенности reasoning-моделей
 

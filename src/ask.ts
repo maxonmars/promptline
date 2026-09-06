@@ -1,6 +1,6 @@
 import type OpenAI from "openai";
-import { FORMATS, type FormatName, type ValidationResult } from "./formats.js";
-import { buildSystemPrompt, type ResponseOptions } from "./options.js";
+import { FORMATS, type FormatName, type ValidationResult } from "./formats.ts";
+import { buildSystemPrompt, type ResponseOptions } from "./options.ts";
 
 export interface AskResult {
   answer: string;

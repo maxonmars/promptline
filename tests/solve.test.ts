@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractFinal } from "../src/solve.js";
+import { extractFinal } from "../src/solve.ts";
 
 describe("extractFinal", () => {
   it("возвращает null, если строки FINAL нет", () => {
