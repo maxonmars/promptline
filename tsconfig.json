@@ -7,7 +7,13 @@
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    // Node исполняет .ts напрямую и не резолвит .js в .ts, поэтому импорты внутри проекта
+    // указывают на .ts, а сборка возвращает им .js.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    // Синтаксис, который стирание типов в Node не осилит (enum, namespace, parameter properties).
+    "erasableSyntaxOnly": true
   },
   "include": ["src", "tests", "vitest.config.ts"]
 }

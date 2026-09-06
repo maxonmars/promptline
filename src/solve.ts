@@ -1,16 +1,19 @@
 import type OpenAI from "openai";
-import { type AskResult, ask } from "./ask.js";
-import { RAW_OPTIONS, type ResponseOptions } from "./options.js";
-import { META_INSTRUCTION, type StrategyName } from "./strategies.js";
+import { type AskResult, ask } from "./ask.ts";
+import { RAW_OPTIONS, type ResponseOptions } from "./options.ts";
+import { META_INSTRUCTION, type StrategyName } from "./strategies.ts";
 
 /** Несёт цену уже сделанных вызовов: у meta первый вызов оплачен, даже когда упал второй. */
 export class StrategyError extends Error {
-  constructor(
-    message: string,
-    readonly spentTokens: number,
-    readonly elapsedMs: number,
-  ) {
+  // Поля объявлены отдельно от конструктора: parameter properties не переживают
+  // стирание типов в Node (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
+  readonly spentTokens: number;
+  readonly elapsedMs: number;
+
+  constructor(message: string, spentTokens: number, elapsedMs: number) {
     super(message);
+    this.spentTokens = spentTokens;
+    this.elapsedMs = elapsedMs;
   }
 }
 

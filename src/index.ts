@@ -1,9 +1,9 @@
 import { stdin, stdout } from "node:process";
 import * as readline from "node:readline/promises";
 import OpenAI from "openai";
-import type { AskResult } from "./ask.js";
-import { type Env, readEnv } from "./env.js";
-import { DEFAULT_MODEL, SWEEP_MODELS } from "./models.js";
+import type { AskResult } from "./ask.ts";
+import { type Env, readEnv } from "./env.ts";
+import { DEFAULT_MODEL, SWEEP_MODELS } from "./models.ts";
 import {
   applySlashCommand,
   type Cli,
@@ -13,9 +13,9 @@ import {
   parseCli,
   RAW_OPTIONS,
   SWEEP_TEMPERATURES,
-} from "./options.js";
-import { answerKey, type SolveResult, StrategyError, solve } from "./solve.js";
-import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.js";
+} from "./options.ts";
+import { answerKey, type SolveResult, StrategyError, solve } from "./solve.ts";
+import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.ts";
 
 let cli: Cli;
 

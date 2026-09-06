@@ -1,8 +1,8 @@
 import { parseArgs } from "node:util";
 import { z } from "zod";
-import { FORMATS, type FormatName, FormatNameSchema } from "./formats.js";
-import { KNOWN_MODELS, SWEEP_MODELS } from "./models.js";
-import { FINAL_CONTRACT, STRATEGIES, type StrategyName, StrategyNameSchema } from "./strategies.js";
+import { FORMATS, type FormatName, FormatNameSchema } from "./formats.ts";
+import { KNOWN_MODELS, SWEEP_MODELS } from "./models.ts";
+import { FINAL_CONTRACT, STRATEGIES, type StrategyName, StrategyNameSchema } from "./strategies.ts";
 
 export interface ResponseOptions {
   /** Способ рассуждения: как думать, в отличие от format — как оформить. */
