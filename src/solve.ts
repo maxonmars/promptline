@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { ask, type AskResult } from "./ask.js";
+import { type AskResult, ask } from "./ask.js";
 import { RAW_OPTIONS, type ResponseOptions } from "./options.js";
 import { META_INSTRUCTION, type StrategyName } from "./strategies.js";
 

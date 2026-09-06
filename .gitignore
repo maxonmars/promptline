@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 
 # Секреты — никогда не попадают в репозиторий
 .env
