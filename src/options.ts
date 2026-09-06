@@ -226,28 +226,32 @@ function ensureCompatible(options: ResponseOptions, reasoning: boolean, finalLin
 }
 
 /** Два refine вместо одного: пустая строка и число вне диапазона — разные сообщения. */
-const TemperatureSchema = z
-  .string()
-  .refine((raw) => raw.trim().length > 0, { error: "--temperature ждёт число от 0 до 2, значение не задано." })
-  .refine(
-    (raw) => {
-      const value = Number(raw);
-      return Number.isFinite(value) && value >= 0 && value <= 2;
-    },
-    { error: (issue) => `--temperature ждёт число от 0 до 2, получено «${issue.input}».` },
-  )
-  .transform((raw) => Number(raw));
-
-function parseTemperature(raw: string): number {
-  return parseWith(TemperatureSchema, raw);
+function temperatureSchema(flag: string) {
+  return z
+    .string()
+    .refine((raw) => raw.trim().length > 0, { error: `${flag} ждёт число от 0 до 2, значение не задано.` })
+    .refine(
+      (raw) => {
+        const value = Number(raw);
+        return Number.isFinite(value) && value >= 0 && value <= 2;
+      },
+      { error: (issue) => `${flag} ждёт число от 0 до 2, получено «${issue.input}».` },
+    )
+    .transform((raw) => Number(raw));
 }
 
-const ThinkingSchema = z
-  .enum(["on", "off"], { error: (issue) => `--thinking ждёт on или off, получено «${issue.input}».` })
-  .transform((value) => value === "on");
+function parseTemperature(raw: string, flag: string): number {
+  return parseWith(temperatureSchema(flag), raw);
+}
 
-function parseThinking(raw: string): boolean {
-  return parseWith(ThinkingSchema, raw);
+function thinkingSchema(flag: string) {
+  return z
+    .enum(["on", "off"], { error: (issue) => `${flag} ждёт on или off, получено «${issue.input}».` })
+    .transform((value) => value === "on");
+}
+
+function parseThinking(raw: string, flag: string): boolean {
+  return parseWith(thinkingSchema(flag), raw);
 }
 
 export function parseCli(argv: string[]): Cli {
@@ -295,9 +299,9 @@ export function parseCli(argv: string[]): Cli {
   if (typeof values["max-words"] === "string") options.maxWords = parseCount(values["max-words"], "--max-words");
   if (typeof values["max-tokens"] === "string") options.maxTokens = parseCount(values["max-tokens"], "--max-tokens");
   if (typeof values.temperature === "string" && !allTemperatures) {
-    options.temperature = parseTemperature(values.temperature);
+    options.temperature = parseTemperature(values.temperature, "--temperature");
   }
-  if (typeof values.thinking === "string") options.thinkingEnabled = parseThinking(values.thinking);
+  if (typeof values.thinking === "string") options.thinkingEnabled = parseThinking(values.thinking, "--thinking");
 
   const model = typeof values.model === "string" && !allModels ? parseModel(values.model, warnings) : null;
 
@@ -470,10 +474,10 @@ export function applySlashCommand(line: string, current: ResponseOptions): Comma
         options.maxTokens = parseCount(argument, "/tokens");
         return changed();
       case "temp":
-        options.temperature = parseTemperature(argument);
+        options.temperature = parseTemperature(argument, "/temp");
         return changed();
       case "thinking":
-        options.thinkingEnabled = parseThinking(argument);
+        options.thinkingEnabled = parseThinking(argument, "/thinking");
         return changed();
       case "stop":
         if (argument === "off") options.stopMarker = null;

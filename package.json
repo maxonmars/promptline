@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "lint:ci": "biome check --reporter=github .",
@@ -29,6 +30,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@types/node": "^24.13.3",
+    "@vitest/coverage-v8": "^5.0.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   }
