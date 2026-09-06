@@ -1,7 +1,6 @@
 import { stdin, stdout } from "node:process";
 import * as readline from "node:readline/promises";
 import OpenAI from "openai";
-import type { AskResult } from "./ask.ts";
 import { type Env, readEnv } from "./env.ts";
 import { DEFAULT_MODEL, SWEEP_MODELS } from "./models.ts";
 import {
@@ -14,7 +13,25 @@ import {
   RAW_OPTIONS,
   SWEEP_TEMPERATURES,
 } from "./options.ts";
-import { answerKey, type SolveResult, StrategyError, solve } from "./solve.ts";
+import {
+  describeExpect,
+  fail,
+  type ModelTally,
+  metrics,
+  modelFootnotes,
+  modelTable,
+  newModelTally,
+  newStrategyTally,
+  newTemperatureTally,
+  render,
+  type StrategyTally,
+  strategyFootnotes,
+  strategyTable,
+  type TemperatureTally,
+  temperatureFootnotes,
+  temperatureTable,
+} from "./report.ts";
+import { answerKey, StrategyError, solve } from "./solve.ts";
 import { STRATEGIES, STRATEGY_NAMES, type StrategyName } from "./strategies.ts";
 
 let cli: Cli;
@@ -59,152 +76,13 @@ let totalTokens = 0;
 
 for (const warning of cli.warnings) console.warn(`! ${warning}`);
 
-/** Пустой ответ у reasoning-модели: рассуждение либо исчерпало лимит, либо задело стоп-секвенцию. */
-function diagnose(result: AskResult): string {
-  if (result.answer.length > 0) return "";
-
-  if (result.finishReason === "length") {
-    return "\n  Лимит --max-tokens кончился на рассуждении модели, до ответа очередь не дошла. Подними лимит.";
-  }
-
-  if (result.stopMarker !== null) {
-    return `\n  Похоже, ${result.stopMarker} встретилась в рассуждении модели и оборвала генерацию. Помогает --no-stop.`;
-  }
-
-  return "";
-}
-
-/** DeepSeek игнорирует temperature, пока включён thinking mode — рассуждение в ответе выдаёт это. */
-function temperatureNote(result: AskResult): string {
-  if (result.temperature === null || result.reasoningTokens === 0) return "";
-
-  return result.thinkingEnabled
-    ? "\n  --temperature не подействовала: thinking mode включён и DeepSeek её игнорирует. Добавь --thinking=off."
-    : "\n  --temperature могла не подействовать: thinking mode выключен флагом, но модель всё равно рассуждала.";
-}
-
-/** У meta сбой случается на первом вызове, и по итоговому ответу его не видно. */
-function preparationNote(result: SolveResult): string {
-  if (result.preparation === null || result.preparation.finishReason !== "length") return "";
-
-  return "\n  Первый вызов оборвался по лимиту: промпт для решения получился неполным.";
-}
-
-function seconds(ms: number): string {
-  return `${(ms / 1000).toFixed(1)} с`;
-}
-
-function verdict(result: SolveResult): string {
-  if (!result.measured) return "";
-  if (result.finalValue === null) return ", строки FINAL нет";
-
-  return `, итог ${result.hit ? "✓" : "✗"} (${result.finalValue})`;
-}
-
-function metrics(result: SolveResult): string {
-  const { final } = result;
-
-  const format =
-    final.format === "text"
-      ? "формат не задан"
-      : final.validation.ok
-        ? "формат ✓"
-        : `формат ✗ (${final.validation.reason})`;
-
-  const spent =
-    final.reasoningTokens > 0
-      ? `${final.completionTokens}, из них рассуждение ${final.reasoningTokens}`
-      : `${final.completionTokens}`;
-
-  const cost =
-    result.preparation === null
-      ? `токенов ${result.totalTokens} (ответ ${spent})`
-      : `токенов ${result.totalTokens} за два вызова (ответ ${spent})`;
-
-  const line =
-    `— ${cost}, символов ${final.answer.length}, finish_reason: ${final.finishReason}, ` +
-    `${format}${verdict(result)}, ${seconds(result.elapsedMs)}`;
-
-  return `${line}${diagnose(final)}${temperatureNote(final)}${preparationNote(result)}`;
-}
-
-function render(result: AskResult): string {
-  return result.answer.length > 0 ? result.answer : "(пустой ответ)";
-}
-
-function fail(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** Первая колонка влево, числовые — вправо. */
-function table(header: string[], rows: string[][]): string {
-  const widths = header.map((_, column) => Math.max(...[header, ...rows].map((row) => (row[column] ?? "").length)));
-
-  return [header, ...rows]
-    .map((row) =>
-      row
-        .map((cell, column) => (column === 0 ? cell.padEnd(widths[column]!) : cell.padStart(widths[column]!)))
-        .join("  "),
-    )
-    .join("\n");
-}
-
-interface Tally {
-  runs: number;
-  /** Прогоны, где итог удалось извлечь: только они идут в знаменатель доли попаданий. */
-  measured: number;
-  hits: number;
-  unmeasured: number;
-  failures: number;
-  tokens: number;
-  ms: number;
-}
-
-/**
- * Счётчики одной температуры. Знаменатель здесь даёт извлечённый итог, а не заданный эталон:
- * контракт FINAL включён и без --expect, и прогон без строки — не ещё один вариант ответа.
- */
-interface TemperatureTally {
-  runs: number;
-  /** Прогоны со строкой FINAL: знаменатель и разнообразия, и точности. */
-  extracted: number;
-  hits: number;
-  failures: number;
-  tokens: number;
-  ms: number;
-  /** Нормализованные итоги: размер множества и есть разнообразие. */
-  answers: Set<string>;
-}
-
-/**
- * Счётчики одного уровня. runs — прогоны с непустым ответом: сбой и пустой content тоже
- * оплачены, но в среднюю цену ответа не идут. attempts — знаменатель долей, отдельно от runs.
- */
-interface ModelTally {
-  attempts: number;
-  runs: number;
-  /** Вызов прошёл, но content пустой: расход есть, ответа нет. */
-  empty: number;
-  extracted: number;
-  hits: number;
-  failures: number;
-  tokens: number;
-  reasoning: number;
-  ms: number;
-}
-
 if (cli.allStrategies) {
   console.log(`\nЗадача: ${cli.prompt}`);
   console.log(`Модель: ${model}`);
   console.log(`Режим: ${describeOptions(options)}`);
-  console.log(`Верный ответ: ${cli.expect === null ? "не задан, сверяем глазами" : cli.expect.join(" | ")}\n`);
+  console.log(`Верный ответ: ${describeExpect(cli.expect)}\n`);
 
-  const tally = new Map<StrategyName, Tally>(
-    STRATEGY_NAMES.map((name) => [
-      name,
-      { runs: 0, measured: 0, hits: 0, unmeasured: 0, failures: 0, tokens: 0, ms: 0 },
-    ]),
-  );
+  const tally = new Map<StrategyName, StrategyTally>(STRATEGY_NAMES.map((name) => [name, newStrategyTally()]));
 
   for (let run = 1; run <= cli.repeat; run += 1) {
     if (cli.repeat > 1) console.log(`═══ прогон ${run}/${cli.repeat} ══════════════════════════════\n`);
@@ -249,28 +127,10 @@ if (cli.allStrategies) {
     }
   }
 
-  const measured = cli.expect !== null;
-  const header = measured ? ["способ", "попаданий", "токенов", "время"] : ["способ", "токенов", "время"];
-
-  const rows = STRATEGY_NAMES.map((name) => {
-    const stats = tally.get(name)!;
-    const cells = [STRATEGIES[name].title, `${stats.tokens}`, seconds(stats.ms)];
-
-    return measured ? [cells[0]!, `${stats.hits}/${stats.measured}`, cells[1]!, cells[2]!] : cells;
-  });
-
   console.log("═══ ИТОГО ══════════════════════════════════════════\n");
-  console.log(table(header, rows));
+  console.log(strategyTable(tally, cli.expect !== null));
 
-  // Промах и неизмеренное — разные вещи, в долю попаданий их мешать нельзя.
-  for (const name of STRATEGY_NAMES) {
-    const stats = tally.get(name)!;
-    const notes: string[] = [];
-
-    if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
-    if (stats.unmeasured > 0) notes.push(`без строки FINAL ${stats.unmeasured}`);
-    if (notes.length > 0) console.log(`  ${STRATEGIES[name].title}: ${notes.join(", ")}`);
-  }
+  for (const line of strategyFootnotes(tally)) console.log(line);
 
   console.log(`\nвсего потрачено токенов: ${totalTokens}`);
 } else if (cli.allTemperatures) {
@@ -278,13 +138,10 @@ if (cli.allStrategies) {
   console.log(`Модель: ${model}`);
   console.log(`Режим: ${describeOptions(options)}`);
   console.log(`Температуры: ${SWEEP_TEMPERATURES.join(", ")}`);
-  console.log(`Верный ответ: ${cli.expect === null ? "не задан, сверяем глазами" : cli.expect.join(" | ")}\n`);
+  console.log(`Верный ответ: ${describeExpect(cli.expect)}\n`);
 
   const tally = new Map<number, TemperatureTally>(
-    SWEEP_TEMPERATURES.map((temperature) => [
-      temperature,
-      { runs: 0, extracted: 0, hits: 0, failures: 0, tokens: 0, ms: 0, answers: new Set<string>() },
-    ]),
+    SWEEP_TEMPERATURES.map((temperature) => [temperature, newTemperatureTally()]),
   );
 
   // Температура внешним циклом: ответы одной настройки идут подряд, иначе разброс не читается.
@@ -332,43 +189,18 @@ if (cli.allStrategies) {
     }
   }
 
-  const measured = cli.expect !== null;
-  const header = measured
-    ? ["температура", "уникальных", "попаданий", "токенов", "время"]
-    : ["температура", "уникальных", "токенов", "время"];
-
-  const rows = SWEEP_TEMPERATURES.map((temperature) => {
-    const stats = tally.get(temperature)!;
-    const cells = [`${temperature}`, `${stats.answers.size}/${stats.extracted}`, `${stats.tokens}`, seconds(stats.ms)];
-
-    return measured ? [cells[0]!, cells[1]!, `${stats.hits}/${stats.extracted}`, cells[2]!, cells[3]!] : cells;
-  });
-
   console.log("═══ ИТОГО ══════════════════════════════════════════\n");
-  console.log(table(header, rows));
+  console.log(temperatureTable(tally, cli.expect !== null));
 
-  for (const temperature of SWEEP_TEMPERATURES) {
-    const stats = tally.get(temperature)!;
-    const missing = stats.runs - stats.extracted;
-    const notes: string[] = [];
-
-    if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
-    if (missing > 0) notes.push(`без строки FINAL ${missing}`);
-    if (notes.length > 0) console.log(`  temperature ${temperature}: ${notes.join(", ")}`);
-  }
+  for (const line of temperatureFootnotes(tally)) console.log(line);
 
   console.log(`\nвсего потрачено токенов: ${totalTokens}`);
 } else if (cli.allModels) {
   console.log(`\nЗапрос: ${cli.prompt}`);
   console.log(`Уровни: ${SWEEP_MODELS.map((tier) => tier.label).join(" / ")}`);
-  console.log(`Верный ответ: ${cli.expect === null ? "не задан, сверяем глазами" : cli.expect.join(" | ")}\n`);
+  console.log(`Верный ответ: ${describeExpect(cli.expect)}\n`);
 
-  const tally = new Map<string, ModelTally>(
-    SWEEP_MODELS.map((tier) => [
-      tier.label,
-      { attempts: 0, runs: 0, empty: 0, extracted: 0, hits: 0, failures: 0, tokens: 0, reasoning: 0, ms: 0 },
-    ]),
-  );
+  const tally = new Map<string, ModelTally>(SWEEP_MODELS.map((tier) => [tier.label, newModelTally()]));
 
   // Уровень внешним циклом, как и температура: ответы одной настройки идут подряд, иначе
   // разброс не читается, а последовательные вызовы не делят общий rate limit.
@@ -422,48 +254,12 @@ if (cli.allStrategies) {
   }
 
   const measured = cli.expect !== null;
-  const header = measured
-    ? ["уровень", "попаданий", "сравнимых", "токенов", "рассуждение", "время"]
-    : ["уровень", "ответов", "токенов", "рассуждение", "время"];
-
-  // "—" вместо 0: уровень без единого ответа не должен выглядеть самым дешёвым и быстрым.
-  const average = (sum: number, runs: number): string => (runs > 0 ? `${Math.round(sum / runs)}` : "—");
-
-  const rows = SWEEP_MODELS.map((tier) => {
-    const stats = tally.get(tier.label)!;
-    const tokens = average(stats.tokens, stats.runs);
-    const reasoning = average(stats.reasoning, stats.runs);
-    const time = stats.runs > 0 ? seconds(stats.ms / stats.runs) : "—";
-
-    if (measured) {
-      return [
-        tier.label,
-        `${stats.hits}/${stats.extracted}`,
-        `${stats.extracted}/${stats.attempts}`,
-        tokens,
-        reasoning,
-        time,
-      ];
-    }
-
-    return [tier.label, `${stats.runs}/${stats.attempts}`, tokens, reasoning, time];
-  });
 
   console.log("═══ ИТОГО ══════════════════════════════════════════\n");
   console.log("токены, рассуждение и время — средние на один полученный ответ, не сумма\n");
-  console.log(table(header, rows));
+  console.log(modelTable(tally, measured));
 
-  // Три разные потери: запрос не прошёл, ответ пришёл пустым, ответ есть — но без строки FINAL.
-  for (const tier of SWEEP_MODELS) {
-    const stats = tally.get(tier.label)!;
-    const missing = stats.runs - stats.extracted;
-    const notes: string[] = [];
-
-    if (stats.failures > 0) notes.push(`сбоев ${stats.failures}`);
-    if (stats.empty > 0) notes.push(`пустых ответов ${stats.empty}`);
-    if (measured && missing > 0) notes.push(`без строки FINAL ${missing}`);
-    if (notes.length > 0) console.log(`  ${tier.label}: ${notes.join(", ")}`);
-  }
+  for (const line of modelFootnotes(tally, measured)) console.log(line);
 
   console.log(`\nвсего потрачено токенов: ${totalTokens}`);
 } else if (cli.compare) {

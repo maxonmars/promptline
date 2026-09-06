@@ -24,8 +24,9 @@ jobs:
       - name: Типы
         run: npm run typecheck
 
+      # Пороги покрытия заданы в vitest.config.ts — шаг падает, если покрытие ниже.
       - name: Тесты
-        run: npm test
+        run: npm run test:coverage
 
       # Сборка проверяет то, чего не видит typecheck: эмит .ts → .js в импортах.
       - name: Сборка
